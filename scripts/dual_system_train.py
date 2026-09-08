@@ -18,7 +18,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Literal
 
 import torch
 import tyro
@@ -109,22 +109,6 @@ class ArgsConfig:
 
     compute_bridge_loss: bool = True
     """Whether to compute loss for bridge features"""
-
-    # Physical State History Monitor (default OFF — does not affect current finetune)
-    use_state_history: bool = False
-    """If True, create state_history_projector and sample S_{t-H:t} in the dataset."""
-
-    compute_state_history_loss: bool = False
-    """If True, add masked MSE state_history_loss to the total loss."""
-
-    state_history_loss_weight: float = 1.0
-    """Weight w for (L + w * L_sh) / (1 + w)."""
-
-    state_history_horizon: Optional[int] = None
-    """H in S_{t-H:t}; None → data action_horizon (LIBERO=8)."""
-
-    tune_state_history_projector: bool = True
-    """Whether to train state_history_projector when the module exists."""
 
     select_layer: int = 12
     """Selected llm backbone layer"""
@@ -232,6 +216,13 @@ class ArgsConfig:
 
     set_metadata_from_pretrained: bool = False
 
+    # Physical State Future auxiliary loss (default off)
+    use_state_future: bool = False
+    compute_state_future_loss: bool = False
+    state_future_loss_weight: float = 1.0
+    state_future_horizon: int = None
+    tune_state_future_projector: bool = True
+
 
 #####################################################################################
 # main training function
@@ -277,12 +268,12 @@ def main(config: ArgsConfig):
             use_bridge=model_config.bridge_cfg['use_bridge'],
             ignore_lang_prefix=config.ignore_lang_prefix,
         )
-        # Sync Physical State History flags onto data config (default False)
-        data_config_cls.use_state_history = bool(config.use_state_history)
-        if config.state_history_horizon is not None:
-            data_config_cls.state_history_horizon = config.state_history_horizon
-        elif data_config_cls.state_history_horizon is None:
-            data_config_cls.state_history_horizon = len(data_config_cls.action_indices)
+        if getattr(config, "use_state_future", False):
+            data_config_cls.use_state_future = True
+            if config.state_future_horizon is not None:
+                data_config_cls.state_future_horizon = config.state_future_horizon
+            else:
+                data_config_cls.state_future_horizon = len(data_config_cls.action_indices)
         modality_configs = data_config_cls.modality_config()
         transforms = data_config_cls.transform()
         tokenizer = transforms.transforms[-1].vlm_processor.tokenizer
@@ -343,11 +334,6 @@ def main(config: ArgsConfig):
     # ------------ step 2: load model ------------
     # First, get the data config to determine action horizon
     data_action_horizon = len(data_config_cls.action_indices)
-    sh_horizon = (
-        config.state_history_horizon
-        if config.state_history_horizon is not None
-        else data_action_horizon
-    )
 
     # Load model
     model = GR00T_N1_5_DIAL.from_pretrained(
@@ -394,11 +380,11 @@ def main(config: ArgsConfig):
         select_layer_for_bridge=config.select_layer_for_bridge,
         matching_coeff=config.matching_coeff,
 
-        use_state_history=config.use_state_history,
-        compute_state_history_loss=config.compute_state_history_loss,
-        state_history_loss_weight=config.state_history_loss_weight,
-        state_history_horizon=sh_horizon,
-        tune_state_history_projector=config.tune_state_history_projector,
+        use_state_future=config.use_state_future,
+        compute_state_future_loss=config.compute_state_future_loss,
+        state_future_loss_weight=config.state_future_loss_weight,
+        state_future_horizon=config.state_future_horizon,
+        tune_state_future_projector=config.tune_state_future_projector,
     )
 
     # Update action_horizon to match data config
@@ -486,7 +472,7 @@ def main(config: ArgsConfig):
         save_strategy="steps",
         save_steps=config.save_steps,
         # evaluation_strategy="no",
-        save_total_limit=10,
+        save_total_limit=0,  # keep ALL checkpoints (no auto-deletion)
         report_to=config.report_to,
         seed=42,
         do_eval=False,

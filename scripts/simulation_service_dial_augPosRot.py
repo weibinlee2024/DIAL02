@@ -29,9 +29,7 @@ import json
 import os
 from transformers import AutoConfig
 import numpy as np
-import pdb
 
-pdb.set_trace = lambda: None
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -115,7 +113,6 @@ if __name__ == "__main__":
         simulation_client = SimulationInferenceClient(host=args.host, port=args.port)
 
         print("Available modality configs:")
-        pdb.set_trace()
         modality_config = simulation_client.get_modality_config()
         print(modality_config.keys())
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 2-card cross-machine pretrain (golden / decoupled), remote machine (10.10.70.107)
+# 2-card cross-machine pretrain (golden / decoupled), local machine (10.10.70.153)
 set -euo pipefail
 
-ROOT=/home/weibin/projects3/DIAL-master_Libero
-DATA_ROOT=/media/weibin/C4E60209E601FC84/DIAL/datasets/LeRobot-AugPosRot-Correct
-PYTHON=/home/weibin/anaconda3/envs/dial/bin/python
+ROOT=/home/weibin/DIAL-master
+DATA_ROOT=$ROOT/Datasets/LeRobot-AugPosRot-Correct
+PYTHON=/home/weibin/miniconda3/envs/dial/bin/python
 
 TASKS=(
   PnPBottleToCabinetClose PnPCanToDrawerClose PnPCupToDrawerClose PnPMilkToMicrowaveClose
@@ -23,19 +23,19 @@ TASKS=(
 DS_ARGS=()
 for t in "${TASKS[@]}"; do DS_ARGS+=("$DATA_ROOT/gr1_unified.$t"); done
 
-OUT=/media/weibin/C4E60209E601FC84/DIAL/outputs-ditfm/pretrain-golden-2card
-LOG=/tmp/pretrain_remote.log
+OUT=$ROOT/outputs/pretrain-golden-2card
+LOG=/tmp/opencode/pretrain_local.log
 mkdir -p "$OUT"
 
 export GRADIENT_CHECKPOINTING=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export NCCL_IB_DISABLE=1
-export NCCL_SOCKET_IFNAME=enp7s0
+export NCCL_SOCKET_IFNAME=eno1
 export IS_TORCHRUN=1
 
 exec "$PYTHON" -m torch.distributed.run \
   --nnodes=2 --nproc_per_node=1 \
-  --master_addr=10.10.70.153 --master_port=29500 --node_rank=1 \
+  --master_addr=10.10.70.153 --master_port=29500 --node_rank=0 \
   --max_restarts=0 \
   "$ROOT/scripts/dual_system_train.py" \
   --bridge_type golden \
