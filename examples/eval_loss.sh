@@ -13,9 +13,9 @@ DATA_CONFIG=${2:-"fourier_gr1_arms_waist_aug_pos_rot_flip_wrist_only_gausNorm_cr
 EMBODIMENT_TAG=${3:-"gr1"}
 TRAJS=${4:-10}
 
-GR1_DATASET_DIR=/dataset_rc_mm/share/datasets/huggingface.co/nvidia/PhysicalAI-Robotics-GR00T-Teleop-Sim/LeRobot-AugPosRot-Correct
+GR1_DATASET_DIR=${GR1_DATASET_DIR:-/home/weibin/DIAL-master/Datasets/LeRobot-AugPosRot-Correct}
 
-PYTHONBREAKPOINT=0 python3 -u scripts/eval_policy_dial.py \
+PYTHONBREAKPOINT=0 /home/weibin/miniconda3/envs/dial/bin/python -u scripts/eval_policy_dial.py \
     --dataset-path \
         ${GR1_DATASET_DIR}/gr1_unified.PnPPotatoToMicrowaveClose \
         ${GR1_DATASET_DIR}/gr1_unified.PosttrainPnPNovelFromPlacematToBowlSplitA \

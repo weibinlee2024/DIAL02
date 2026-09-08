@@ -15,6 +15,8 @@
 
 set -euo pipefail
 
+export PATH=/home/weibin/miniconda3/envs/dial/bin:$PATH
+
 MODEL_PATH=${1:?"Usage: bash examples/eval.sh <model_path> <eval_type>"}
 EVAL_TYPE=${2:?"Eval type: id | ood_object_appearance | ood_container_combination | ood_object_type"}
 PORT=${PORT:-50051}
