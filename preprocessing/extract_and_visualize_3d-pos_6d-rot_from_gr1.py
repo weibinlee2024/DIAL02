@@ -444,6 +444,11 @@ def main(args):
     if args.n is not None:
         demos = demos[:args.n]
 
+    if getattr(args, "only", None) is not None:
+        allowed = set(args.only.split(","))
+        demos = [d for d in demos if d in allowed]
+        print(f"Filtered to {len(demos)} demo(s): {demos}")
+
     if args.num_parallel_jobs > 1:
         with ProcessPoolExecutor(max_workers=args.num_parallel_jobs) as executor:
             list(tqdm(executor.map(partial(process_demo, args), demos), total=len(demos), desc="Overall Progress"))
@@ -457,6 +462,8 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, required=True, help="Path to hdf5 dataset")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save output parquet and mp4 files")
     parser.add_argument("--n", type=int, default=None, help="Number of trajectories to process")
+    parser.add_argument("--only", type=str, default=None,
+                        help="Comma-separated list of demo ids to process only, e.g. 'demo_701'")
     parser.add_argument("--num_parallel_jobs", type=int, default=1, help="Number of parallel jobs to use")
     parser.add_argument("--use-actions", action="store_true", help="Use open-loop action playback")
     parser.add_argument("--render_image_names", type=str, nargs="+", default=None, help="Camera name(s) to use for rendering")
