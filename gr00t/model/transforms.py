@@ -240,8 +240,11 @@ class GR00TTransform(InvertibleModalityTransform):
     random_indices_start: int = sys.maxsize
     vlm_gap: Optional[int] = None
     action_gap_range: Optional[list]=None
-    use_state_history: bool = False
-    state_history_horizon: Optional[int] = None
+
+    # Physical State Future (auxiliary label; default off)
+    use_state_future: bool = False
+    state_future_horizon: Optional[int] = None
+    state_future_concat_order: list[str] = Field(default_factory=list)
 
     def model_post_init(self, __context):
         """Called by Pydantic after model init."""
@@ -418,47 +421,6 @@ class GR00TTransform(InvertibleModalityTransform):
         n_state_tokens = state.shape[0]
         return state, state_mask, n_state_tokens
 
-    def _prepare_state_history(self, data: dict):
-        """
-        Pad concatenated state_history [H+1, D] to max_state_dim.
-        Return (state_history, state_history_mask).
-        """
-        expected_len = (
-            (self.state_history_horizon + 1)
-            if self.state_history_horizon is not None
-            else None
-        )
-        if "state_history" not in data:
-            if expected_len is None:
-                expected_len = self.action_horizon + 1
-            state_history = np.zeros((expected_len, self.max_state_dim))
-            state_history_mask = np.zeros((expected_len, self.max_state_dim), dtype=bool)
-            return state_history, state_history_mask
-
-        state_history = data["state_history"]
-        if hasattr(state_history, "detach"):
-            state_history = state_history.detach().cpu().numpy()
-        state_history = np.asarray(state_history)
-        if expected_len is not None:
-            assert state_history.shape[0] == expected_len, (
-                f"{state_history.shape=}, expected_len={expected_len}"
-            )
-
-        n_state_dims = state_history.shape[-1]
-        if n_state_dims > self.max_state_dim:
-            state_history = state_history[:, : self.max_state_dim]
-            n_state_dims = self.max_state_dim
-        else:
-            state_history = np.pad(
-                state_history,
-                ((0, 0), (0, self.max_state_dim - n_state_dims)),
-                "constant",
-            )
-
-        state_history_mask = np.zeros_like(state_history).astype(bool)
-        state_history_mask[:, :n_state_dims] = True
-        return state_history, state_history_mask
-
     def _prepare_action(self, data: dict):
         """
         Pad to max_action_dim, return masks.
@@ -608,11 +570,6 @@ class GR00TTransformWithGoalImage(GR00TTransform):
         transformed_data["state"] = state
         transformed_data["state_mask"] = state_mask
 
-        if self.use_state_history:
-            state_history, state_history_mask = self._prepare_state_history(data)
-            transformed_data["state_history"] = state_history
-            transformed_data["state_history_mask"] = state_history_mask
-
         if self.training:
             # 3) Prepare actions
             transformed_data["segmentation_target"] = np.zeros((2,))
@@ -659,6 +616,12 @@ class GR00TTransformWithGoalImage(GR00TTransform):
 
         transformed_data["embodiment_id"] = self.get_embodiment_tag()
 
+        # Physical State Future auxiliary label (S_{t:t+H})
+        if self.use_state_future:
+            state_future, state_future_mask = self._prepare_state_future(data)
+            transformed_data["state_future"] = state_future
+            transformed_data["state_future_mask"] = state_future_mask
+
         if self.training:
             action_and_mask_keys = ["action", "action_mask"]
             assert all(
@@ -667,6 +630,50 @@ class GR00TTransformWithGoalImage(GR00TTransform):
             ), f"Shape mismatch: {[(key, transformed_data[key].shape) for key in action_and_mask_keys]}"
 
         return transformed_data
+
+    def _prepare_state_future(self, data: dict):
+        """
+        Concatenate normalized future-state frames (state_future.<subkey>), pad to
+        max_state_dim. Return (state_future, state_future_mask) as numpy arrays.
+        """
+        horizon = (
+            self.state_future_horizon
+            if self.state_future_horizon is not None
+            else self.action_horizon
+        )
+        expected_len = horizon + 1
+
+        sf_keys = [k for k in self.state_future_concat_order if k in data]
+        if not sf_keys:
+            state_future = np.zeros((expected_len, self.max_state_dim))
+            state_future_mask = np.zeros((expected_len, self.max_state_dim), dtype=bool)
+            return state_future, state_future_mask
+
+        frames = []
+        for k in self.state_future_concat_order:
+            v = data[k]
+            if hasattr(v, "detach"):  # torch tensor -> numpy
+                v = v.detach().cpu().numpy()
+            frames.append(np.asarray(v))
+        state_future = np.concatenate(frames, axis=-1)  # [H+1, D_concat]
+        assert state_future.shape[0] == expected_len, (
+            f"{state_future.shape=}, expected_len={expected_len}"
+        )
+
+        n_state_dims = state_future.shape[-1]
+        if n_state_dims > self.max_state_dim:
+            state_future = state_future[:, : self.max_state_dim]
+            n_state_dims = self.max_state_dim
+        else:
+            state_future = np.pad(
+                state_future,
+                ((0, 0), (0, self.max_state_dim - n_state_dims)),
+                "constant",
+            )
+
+        state_future_mask = np.zeros_like(state_future).astype(bool)
+        state_future_mask[:, :n_state_dims] = True
+        return state_future, state_future_mask
 
     def _prepare_video(self, data: dict):
         """Process, stack, and pad images from data['video']."""

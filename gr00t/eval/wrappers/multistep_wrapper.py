@@ -18,7 +18,6 @@ from collections import defaultdict, deque
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-import pdb
 
 def stack_repeated(x, n, loc):
     return np.repeat(np.expand_dims(x, axis=loc), n, axis=loc)
@@ -203,7 +202,6 @@ class MultiStepWrapper(gym.Wrapper):
         """
         action: dict: key-value pairs where the values are of shape (n_action_steps,) + action_shape
         """
-        pdb.set_trace()
         states = []
         rewards = []
         dones = []
@@ -281,7 +279,6 @@ class MultiStepWrapper(gym.Wrapper):
                 else:
                     raise ValueError(f"Unknown key: {key}")
 
-            pdb.set_trace()
             for key in self.state_modality_keys:
                 if key not in self.observation_space.keys():
                     if state_delta_indices is not None:
@@ -292,7 +289,6 @@ class MultiStepWrapper(gym.Wrapper):
                         )
                     this_obs = [self.obs[i][key] for i in delta_indices]
                     result[key] = np.stack(this_obs, axis=0)
-            pdb.set_trace()
 
             return result
         else:

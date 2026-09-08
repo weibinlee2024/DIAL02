@@ -48,9 +48,6 @@ class BaseDataConfig(ABC):
     use_bridge = False
     fix_language = None
     random_indices_start = sys.maxsize
-    # Physical State History Monitor — default off (no sampling / no model head)
-    use_state_history = False
-    state_history_horizon = None  # None → len(action_indices)
 
     def __init__(self, vlm_path: str = DEFAULT_VLM_PATH, use_bridge: bool = False, ignore_lang_prefix: bool = False):
         self.vlm_path = vlm_path
@@ -72,23 +69,28 @@ class BaseDataConfig(ABC):
             modality_keys=self.action_keys,
             vlm_gap=self.vlm_gap if hasattr(self, "vlm_gap") else None,
             action_gap_range=self.action_gap_range if hasattr(self, "action_gap_range") else None,
-            use_state_history=bool(getattr(self, "use_state_history", False)),
-            state_history_horizon=(
-                self.state_history_horizon
-                if getattr(self, "state_history_horizon", None) is not None
-                else len(self.action_indices)
-            ),
         )
         language_modality = ModalityConfig(
             delta_indices=self.observation_indices,
             modality_keys=self.language_keys,
         )
-        return {
+        modality_configs = {
             "video": video_modality,
             "state": state_modality,
             "action": action_modality,
             "language": language_modality,
         }
+        # Physical State Future auxiliary label modality (S_{t:t+H})
+        if getattr(self, "use_state_future", False):
+            sf_horizon = getattr(self, "state_future_horizon", None)
+            if sf_horizon is None:
+                sf_horizon = len(self.action_indices)
+            sf_keys = [k.replace("state.", "state_future.", 1) for k in self.state_keys]
+            modality_configs["state_future"] = ModalityConfig(
+                delta_indices=list(range(sf_horizon + 1)),
+                modality_keys=sf_keys,
+            )
+        return modality_configs
 
     @abstractmethod
     def transform(self) -> ModalityTransform:
@@ -746,125 +748,6 @@ class OxeDroidDataConfig(BaseDataConfig):
 ###########################################################################################
 
 
-class LiberoDataConfig(BaseDataConfig):
-    """
-    LIBERO Franka single-arm config for RND dense / converted LeRobot data.
-
-    Locked: action_horizon=8 (align RND collect chunk); train VideoResize 128->224.
-    """
-
-    video_keys = [
-        "video.image",
-        "video.wrist_image",
-    ]
-    state_keys = [
-        "state.eef_position",
-        "state.eef_rotation",
-        "state.gripper_position",
-    ]
-    action_keys = [
-        "action.eef_position_delta",
-        "action.eef_rotation_delta",
-        "action.gripper_position",
-    ]
-    language_keys = ["annotation.human.action.task_description"]
-    observation_indices = [0]
-    video_delta_indices = [0]
-    # Locked: horizon=8 for fair compare with RND chunk / baseline
-    action_indices = list(range(8))
-    vlm_gap = 8
-    action_gap_range = [8, 8]
-
-    def transform(self):
-        state_norm_modes = {
-            "state.eef_position": "min_max",
-            "state.gripper_position": "min_max",
-        }
-        state_target_rots = {
-            "state.eef_rotation": "rotation_6d",
-        }
-        transforms = [
-            VideoToTensor(apply_to=self.video_keys),
-            # Mild crop only — source is already 128x128
-            VideoCrop(apply_to=self.video_keys, scale=0.98),
-            VideoResize(
-                apply_to=self.video_keys, height=224, width=224, interpolation="linear"
-            ),
-            VideoColorJitter(
-                apply_to=self.video_keys,
-                brightness=0.3,
-                contrast=0.4,
-                saturation=0.5,
-                hue=0.08,
-            ),
-            VideoToNumpy(apply_to=self.video_keys),
-            StateActionToTensor(apply_to=self.state_keys),
-            StateActionTransform(
-                apply_to=self.state_keys,
-                normalization_modes=state_norm_modes,
-                target_rotations=state_target_rots,
-            ),
-        ]
-        # Optional Physical State History Monitor transforms (default off)
-        if getattr(self, "use_state_history", False):
-            sh_keys = [k.replace("state.", "state_history.", 1) for k in self.state_keys]
-            sh_norm = {
-                k.replace("state.", "state_history.", 1): v for k, v in state_norm_modes.items()
-            }
-            sh_rots = {
-                k.replace("state.", "state_history.", 1): v for k, v in state_target_rots.items()
-            }
-            transforms.extend(
-                [
-                    StateActionToTensor(apply_to=sh_keys),
-                    StateActionTransform(
-                        apply_to=sh_keys,
-                        normalization_modes=sh_norm,
-                        target_rotations=sh_rots,
-                    ),
-                ]
-            )
-        transforms.extend(
-            [
-                StateActionToTensor(apply_to=self.action_keys),
-                StateActionTransform(
-                    apply_to=self.action_keys,
-                    normalization_modes={
-                        "action.gripper_position": "binary",
-                    },
-                    target_rotations={"action.eef_rotation_delta": "axis_angle"},
-                ),
-                ConcatTransform(
-                    video_concat_order=self.video_keys,
-                    state_concat_order=self.state_keys,
-                    action_concat_order=self.action_keys,
-                ),
-                GR00TTransformWithGoalImage(
-                    vlm_gap=self.vlm_gap,
-                    action_gap_range=self.action_gap_range,
-                    state_horizon=len(self.observation_indices),
-                    action_horizon=len(self.action_indices),
-                    # Match model config action_dim/max_state_dim (see gr00t_n1.5_dial_augPosRot.json)
-                    max_state_dim=128,
-                    max_action_dim=128,
-                    vlm_path=self.vlm_path,
-                    use_bridge=self.use_bridge,
-                    ignore_lang_prefix=self.ignore_lang_prefix,
-                    use_state_history=bool(getattr(self, "use_state_history", False)),
-                    state_history_horizon=(
-                        self.state_history_horizon
-                        if getattr(self, "state_history_horizon", None) is not None
-                        else len(self.action_indices)
-                    ),
-                ),
-            ]
-        )
-        return ComposedModalityTransform(transforms=transforms)
-
-
-###########################################################################################
-
-
 class AgibotGenie1DataConfig(BaseDataConfig):
     video_keys = [
         "video.top_head",
@@ -991,7 +874,7 @@ class AgibotGenie1TopHeadGausNormDataConfig(BaseDataConfig):
             StateActionToTensor(apply_to=self.action_keys),
             StateActionTransform(
                 apply_to=self.action_keys,
-                normalization_modes={key: "mean_std" for key in self.action_keys},
+                normalization_modes=self.action_normalization_modes,
             ),
             # concat transforms
             ConcatTransform(
@@ -1189,6 +1072,11 @@ class EgoDexHandWristGR1OnlyAlignCoordGausNormCropDataConfig(EgoDexHandWristGR1O
 
 class FourierGr1ArmsWaistAugPosRotFlipDataConfig(FourierGr1ArmsWaistDataConfig):
     video_keys = ["video.ego_view"]
+
+    # Physical State Future auxiliary label (default off)
+    use_state_future = False
+    state_future_horizon = None  # None -> len(action_indices)
+
     state_keys = [
         'state.wrist_r_pos', 
         'state.wrist_r_rot6d', 
@@ -1347,6 +1235,8 @@ class FourierGr1ArmsWaistAugPosRotFlipCropDataConfig(FourierGr1ArmsWaistAugPosRo
                 apply_to=self.action_keys,
                 normalization_modes=self.action_normalization_modes,
             ),
+            # state_future auxiliary pipeline (only when enabled)
+            *self._build_state_future_pipeline(),
             # concat transforms
             ConcatTransform(
                 video_concat_order=self.video_keys,
@@ -1363,10 +1253,39 @@ class FourierGr1ArmsWaistAugPosRotFlipCropDataConfig(FourierGr1ArmsWaistAugPosRo
                 max_action_dim=128,
                 vlm_path=self.vlm_path,
                 use_bridge=self.use_bridge, 
-                ignore_lang_prefix=self.ignore_lang_prefix
+                ignore_lang_prefix=self.ignore_lang_prefix,
+                use_state_future=bool(getattr(self, "use_state_future", False)),
+                state_future_horizon=(
+                    self.state_future_horizon
+                    if getattr(self, "state_future_horizon", None) is not None
+                    else len(self.action_indices)
+                ),
+                state_future_concat_order=[
+                    k.replace("state.", "state_future.", 1) for k in self.state_keys
+                ],
             ),
         ]
         return ComposedModalityTransform(transforms=transforms)
+
+    def _build_state_future_pipeline(self) -> list:
+        """Transforms to normalize state_future.* keys identically to state.* (borrowing stats)."""
+        if not getattr(self, "use_state_future", False):
+            return []
+        sf_keys = [k.replace("state.", "state_future.", 1) for k in self.state_keys]
+        sf_sin_cos = [
+            k.replace("state.", "state_future.", 1) for k in
+            ["state.right_arm", "state.right_hand", "state.left_arm", "state.left_hand", "state.waist"]
+        ]
+        sf_norm = {
+            k.replace("state.", "state_future.", 1): v
+            for k, v in self.state_normalization_modes.items()
+        }
+        return [
+            StateActionToTensor(apply_to=sf_keys),
+            StateActionSinCosTransform(apply_to=sf_sin_cos),
+            StateActionTransform(apply_to=sf_keys, normalization_modes=sf_norm),
+        ]
+
 ###########################################################################################
 
 class FourierGr1ArmsWaistAugPosRotFlipWristOnlyCropDataConfig(FourierGr1ArmsWaistAugPosRotFlipCropDataConfig):
@@ -1461,7 +1380,6 @@ DATA_CONFIG_MAP = {
     "unitree_g1": UnitreeG1DataConfig,
     "unitree_g1_full_body": UnitreeG1FullBodyDataConfig,
     "oxe_droid": OxeDroidDataConfig,
-    "libero": LiberoDataConfig,
     "agibot_genie1": AgibotGenie1DataConfig,
     "agibot_genie1_topHead_GausNorm": AgibotGenie1TopHeadGausNormDataConfig,
     "fourier_gr1_arms_waist_aug_pos_rot_flip": FourierGr1ArmsWaistAugPosRotFlipDataConfig,

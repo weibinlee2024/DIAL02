@@ -142,11 +142,12 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
         vlm_small_lr: float=None,
         select_layer_for_bridge: int=None,
         matching_coeff: float = None,
-        use_state_history: bool = False,
-        compute_state_history_loss: bool = False,
-        state_history_loss_weight: float = 1.0,
-        state_history_horizon: int = None,
-        tune_state_history_projector: bool = True,
+
+        use_state_future: bool = False,
+        compute_state_future_loss: bool = False,
+        state_future_loss_weight: float = 1.0,
+        state_future_horizon: int = None,
+        tune_state_future_projector: bool = True,
     ):
         assert isinstance(config.backbone_cfg, dict)
         assert isinstance(config.action_head_cfg, dict)
@@ -218,38 +219,6 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
                 nn.Linear(self.backbone.vlm_model.config.hidden_size, self.backbone.vlm_model.config.hidden_size),
             )
 
-            # Physical State History Monitor (default off — module not created)
-            self.use_state_history = bool(use_state_history)
-            self.compute_state_history_loss = bool(compute_state_history_loss)
-            self.state_history_loss_weight = float(state_history_loss_weight)
-            sh_horizon = state_history_horizon
-            if sh_horizon is None:
-                sh_horizon = config.bridge_cfg.get("state_history_horizon", None)
-            if sh_horizon is None:
-                sh_horizon = config.action_horizon
-            self.state_history_horizon = int(sh_horizon)
-            self.tune_state_history_projector = tune_state_history_projector
-            self.max_state_dim_for_history = int(
-                config.action_head_cfg.get("max_state_dim", config.action_dim)
-            )
-
-            if self.use_state_history:
-                hidden = self.backbone.vlm_model.config.hidden_size
-                out_dim = (self.state_history_horizon + 1) * self.max_state_dim_for_history
-                self.state_history_projector = nn.Sequential(
-                    nn.Linear(hidden, hidden),
-                    nn.GELU(),
-                    nn.Linear(hidden, out_dim),
-                )
-                print(
-                    f"State history projector: H={self.state_history_horizon}, "
-                    f"out_frames={self.state_history_horizon + 1}, "
-                    f"max_state_dim={self.max_state_dim_for_history}, "
-                    f"compute_loss={self.compute_state_history_loss}"
-                )
-            else:
-                print("State history projector: DISABLED")
-
             self.use_separate_projector_for_loss = use_separate_projector_for_loss
             if self.use_separate_projector_for_loss:
                 self.bridge_projector_for_loss = deepcopy(self.bridge_projector)
@@ -271,9 +240,6 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
 
             self.vlm_small_lr = vlm_small_lr
             print(f"vlm_small_lr: {self.vlm_small_lr}")
-        else:
-            self.use_state_history = False
-            self.compute_state_history_loss = False
 
         self.action_horizon = config.action_horizon
         self.action_dim = config.action_dim
@@ -294,27 +260,35 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
         self.noise_tau = noise_tau
         self.reweight_noise = reweight_noise
         self.action_head.unified_embodiment_id = unified_embodiment_id
-        self.register_buffer("bridge_training_steps", torch.tensor(0, dtype=torch.float32), persistent=False)
 
-    def _align_goal_to_bridge_tokens(self, goal_image_embeds: torch.Tensor) -> torch.Tensor:
-        """Mean-pool multi-view goal tokens so seq length matches num_bridge_tokens.
-
-        Qwen/Eagle encode ~num_bridge_tokens per image; dual-cam LIBERO goals
-        concatenate views (e.g. 128) while bridge tokens stay at 64.
-        """
-        seq_len = goal_image_embeds.shape[1]
-        n = self.num_bridge_tokens
-        if seq_len == n:
-            return goal_image_embeds
-        if seq_len % n == 0:
-            n_views = seq_len // n
-            return goal_image_embeds.reshape(
-                goal_image_embeds.shape[0], n_views, n, goal_image_embeds.shape[-1]
-            ).mean(dim=1)
-        raise ValueError(
-            f"goal_image_embeds length {seq_len} is not a multiple of "
-            f"num_bridge_tokens={n}"
+        # Physical State Future Foresight (auxiliary head; default off — bypasses the Action Head)
+        self.use_state_future = bool(use_state_future)
+        self.compute_state_future_loss = bool(compute_state_future_loss)
+        self.state_future_loss_weight = float(state_future_loss_weight)
+        sf_horizon = state_future_horizon
+        if sf_horizon is None:
+            sf_horizon = config.action_horizon
+        self.state_future_horizon = int(sf_horizon)
+        self.tune_state_future_projector = tune_state_future_projector
+        self.state_dim_for_future = int(
+            config.action_head_cfg.get("max_state_dim", config.action_dim)
         )
+        if self.use_state_future and self.use_bridge:
+            hidden = self.backbone.vlm_model.config.hidden_size
+            self.state_future_projector = nn.Sequential(
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, (self.state_future_horizon + 1) * self.state_dim_for_future),
+            )
+            print(
+                f"State future projector: H={self.state_future_horizon}, "
+                f"out_frames={self.state_future_horizon + 1}, "
+                f"max_state_dim={self.state_dim_for_future}, "
+                f"compute_loss={self.compute_state_future_loss}"
+            )
+        else:
+            print("State future projector: DISABLED")
+        self.register_buffer("bridge_training_steps", torch.tensor(0, dtype=torch.float32), persistent=False)
 
     def _extract_dino(self, pixel_values, downsample_to_n=None):
         """
@@ -459,39 +433,6 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
             # Put loss features back into backbone_outputs for subsequent bridge_loss computation
             backbone_outputs['backbone_features'] = projected_feat_loss
 
-            # Physical State History Monitor (auxiliary; does not feed Action Head)
-            if getattr(self, "use_state_history", False) and hasattr(self, "state_history_projector"):
-                pooled = raw_backbone_feat.mean(dim=1)  # [B, H]
-                pred_flat = self.state_history_projector(pooled)
-                hist_len = self.state_history_horizon + 1
-                pred_state_history = pred_flat.view(
-                    batch_size, hist_len, self.max_state_dim_for_history
-                )
-                if self.compute_state_history_loss:
-                    if "state_history" not in action_inputs:
-                        print(
-                            "WARNING: compute_state_history_loss=True but batch has no "
-                            "state_history — skipping state_history_loss "
-                            "(enable use_state_history on data config)."
-                        )
-                    else:
-                        gt = action_inputs["state_history"]
-                        # Expect [B, H+1, max_state_dim]
-                        if gt.ndim == 2:
-                            gt = gt.unsqueeze(0)
-                        mask = action_inputs.get("state_history_mask", None)
-                        if mask is not None and mask.ndim == 2:
-                            mask = mask.unsqueeze(0)
-                        diff = (pred_state_history - gt.to(pred_state_history.dtype)) ** 2
-                        if mask is not None:
-                            mask_f = mask.to(diff.dtype)
-                            state_history_loss = (diff * mask_f).sum() / mask_f.sum().clamp_min(1.0)
-                        else:
-                            state_history_loss = diff.mean()
-                        output_dict["state_history_loss"] = state_history_loss
-                if action_mode:
-                    output_dict["pred_state_history"] = pred_state_history
-
             # Process current observation (supports multi-view)
             if self.use_dino_vision:
                 # dino_img: [Batch, Views, C, H, W]  (C=3, H=224, W=224, uint8)
@@ -563,8 +504,6 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
                 else:
                     raise NotImplementedError
 
-                goal_image_embeds = self._align_goal_to_bridge_tokens(goal_image_embeds)
-
             if self.compute_bridge_loss:
                 if self.bridge_loss_type == "mse":
                     bridge_loss = F.mse_loss(backbone_outputs['backbone_features'], goal_image_embeds)
@@ -606,7 +545,6 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
                         goal_image_embeds = self.bridge_goal_model(*goal_image_input.values())
                         goal_image_embeds = goal_image_embeds.reshape(batch_size, -1, goal_image_embeds.shape[-1])
                         
-                    goal_image_embeds = self._align_goal_to_bridge_tokens(goal_image_embeds)
                     if self.bridge_loss_type == "cosine":
                         goal_image_embeds = F.normalize(goal_image_embeds, p=2, dim=-1)
 
@@ -712,6 +650,32 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
                 output_dict['match_loss'] = action_head_outputs['match_loss']
                 output_dict['raw_action_loss'] = action_head_outputs['action_loss']
 
+            # Physical State Future Foresight (auxiliary; does not feed the Action Head)
+            if self.use_bridge and self.use_state_future and hasattr(self, "state_future_projector"):
+                pooled = raw_backbone_feat.mean(dim=1)  # [B, H]
+                pred_flat = self.state_future_projector(pooled)
+                fut_len = self.state_future_horizon + 1
+                pred_state_future = pred_flat.view(batch_size, fut_len, self.state_dim_for_future)
+                if self.compute_state_future_loss:
+                    gt = action_inputs.get("state_future")
+                    if gt is None:
+                        print(
+                            "WARNING: compute_state_future_loss=True but batch has no "
+                            "state_future — skipping state_future_loss "
+                            "(enable use_state_future on data config)."
+                        )
+                    else:
+                        gt = gt.to(pred_state_future.dtype)
+                        mask = action_inputs.get("state_future_mask")
+                        if mask is not None:
+                            mask = mask.to(pred_state_future.dtype)
+                        diff = (pred_state_future - gt) ** 2
+                        if mask is not None:
+                            state_future_loss = (diff * mask).sum() / mask.sum().clamp_min(1.0)
+                        else:
+                            state_future_loss = diff.mean()
+                        output_dict["state_future_loss"] = state_future_loss
+
             loss = action_head_outputs['loss']
             if 'bridge_loss' in output_dict:
                 bridge_cfg = self.config.bridge_cfg
@@ -732,10 +696,10 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
                 else:
                     loss = (loss + output_dict['bridge_loss']) / 2
 
-            # Auxiliary Physical State History loss (default off — formula unchanged when absent)
-            if 'state_history_loss' in output_dict:
-                w_s = float(getattr(self, "state_history_loss_weight", 1.0))
-                loss = (loss + w_s * output_dict['state_history_loss']) / (1.0 + w_s)
+            # Auxiliary Physical State Future loss (default off — formula unchanged when absent)
+            if 'state_future_loss' in output_dict:
+                w_f = float(getattr(self, "state_future_loss_weight", 1.0))
+                loss = (loss + w_f * output_dict['state_future_loss']) / (1.0 + w_f)
 
             output_dict['loss'] = loss
             return BatchFeature(data=output_dict)
@@ -824,24 +788,18 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
             use_separate_projector_for_loss = kwargs.pop("use_separate_projector_for_loss", model_config.bridge_cfg.get('use_separate_projector_for_loss', False))
             vlm_small_lr = kwargs.pop("vlm_small_lr", model_config.bridge_cfg.get('vlm_small_lr', False))
             matching_coeff = kwargs.pop("matching_coeff", model_config.action_head_cfg.get('matching_coeff', None))
-            use_state_history = kwargs.pop(
-                "use_state_history", model_config.bridge_cfg.get("use_state_history", False)
+            use_state_future = kwargs.pop("use_state_future", model_config.bridge_cfg.get('use_state_future', False))
+            compute_state_future_loss = kwargs.pop(
+                "compute_state_future_loss", model_config.bridge_cfg.get('compute_state_future_loss', False)
             )
-            compute_state_history_loss = kwargs.pop(
-                "compute_state_history_loss",
-                model_config.bridge_cfg.get("compute_state_history_loss", False),
+            state_future_loss_weight = kwargs.pop(
+                "state_future_loss_weight", model_config.bridge_cfg.get('state_future_loss_weight', 1.0)
             )
-            state_history_loss_weight = kwargs.pop(
-                "state_history_loss_weight",
-                model_config.bridge_cfg.get("state_history_loss_weight", 1.0),
+            state_future_horizon = kwargs.pop(
+                "state_future_horizon", model_config.bridge_cfg.get('state_future_horizon', None)
             )
-            state_history_horizon = kwargs.pop(
-                "state_history_horizon",
-                model_config.bridge_cfg.get("state_history_horizon", None),
-            )
-            tune_state_history_projector = kwargs.pop(
-                "tune_state_history_projector",
-                model_config.bridge_cfg.get("tune_state_history_projector", True),
+            tune_state_future_projector = kwargs.pop(
+                "tune_state_future_projector", model_config.bridge_cfg.get('tune_state_future_projector', True)
             )
         except Exception as e:
             print(kwargs)
@@ -853,6 +811,8 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
         print(f"Tune all llm token embeddings: {tune_all_llm_embedding}")
         print(f"Use image type embeddings: {use_image_type_embedding}")
         print(f"Omit image type embeddings for goal images: {omit_image_type_embedding_for_goal}")
+        print(f"State future: use={use_state_future} compute_loss={compute_state_future_loss} "
+              f"weight={state_future_loss_weight} horizon={state_future_horizon}")
         print(f"Action head using only one obs: {action_only_one_obs}")
         print(f"Noise Tau: {noise_tau}")
         print(f"Reweight Noise: {reweight_noise}")
@@ -862,11 +822,6 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
         print(f"use_separate_projector_for_loss: {use_separate_projector_for_loss}")
         print(f"vlm_small_lr: {vlm_small_lr}")
         print(f"matching_coeff: {matching_coeff}")
-        print(f"use_state_history: {use_state_history}")
-        print(f"compute_state_history_loss: {compute_state_history_loss}")
-        print(f"state_history_loss_weight: {state_history_loss_weight}")
-        print(f"state_history_horizon: {state_history_horizon}")
-        print(f"tune_state_history_projector: {tune_state_history_projector}")
 
         select_layer = kwargs.pop("select_layer", None)
         select_layer_for_bridge = kwargs.pop("select_layer_for_bridge", None)
@@ -917,11 +872,11 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
             "vlm_small_lr": vlm_small_lr,
             "select_layer_for_bridge": select_layer_for_bridge,
             "matching_coeff": matching_coeff,
-            "use_state_history": use_state_history,
-            "compute_state_history_loss": compute_state_history_loss,
-            "state_history_loss_weight": state_history_loss_weight,
-            "state_history_horizon": state_history_horizon,
-            "tune_state_history_projector": tune_state_history_projector,
+            "use_state_future": use_state_future,
+            "compute_state_future_loss": compute_state_future_loss,
+            "state_future_loss_weight": state_future_loss_weight,
+            "state_future_horizon": state_future_horizon,
+            "tune_state_future_projector": tune_state_future_projector,
         }
 
         kwargs["output_loading_info"] = True
@@ -1032,11 +987,6 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
         pretrained_model.config.bridge_cfg['bridge_loss_decay_steps'] = bridge_loss_decay_steps
         pretrained_model.config.bridge_cfg['use_separate_projector_for_loss'] = use_separate_projector_for_loss
         pretrained_model.config.bridge_cfg['vlm_small_lr'] = vlm_small_lr
-        pretrained_model.config.bridge_cfg['use_state_history'] = use_state_history
-        pretrained_model.config.bridge_cfg['compute_state_history_loss'] = compute_state_history_loss
-        pretrained_model.config.bridge_cfg['state_history_loss_weight'] = state_history_loss_weight
-        pretrained_model.config.bridge_cfg['state_history_horizon'] = state_history_horizon
-        pretrained_model.config.bridge_cfg['tune_state_history_projector'] = tune_state_history_projector
         if matching_coeff is not None:
             if hasattr(pretrained_model, 'config'):
                 if 'action_head_cfg' not in pretrained_model.config.__dict__:
@@ -1066,11 +1016,6 @@ class GR00T_N1_5_DIAL(PreTrainedModel):
 
         if self.use_image_type_embedding:
             self.image_type_embedding.requires_grad_(self.tune_image_type_embedding)
-
-        if hasattr(self, "state_history_projector"):
-            tune_sh = getattr(self, "tune_state_history_projector", True)
-            self.state_history_projector.requires_grad_(tune_sh)
-            print(f"Tune state history projector: {tune_sh}")
 
     def set_frozen_modules_to_eval_mode(self):
         """

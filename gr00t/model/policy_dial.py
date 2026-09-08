@@ -234,11 +234,6 @@ class DialPolicy(BasePolicy):
             bridge_loss = np.squeeze(bridge_loss.cpu().numpy(), axis=0)
             unnormalized_action['bridge_loss'] = bridge_loss
 
-        state_history_loss = model_pred.get("state_history_loss", None)
-        if state_history_loss is not None:
-            state_history_loss = np.squeeze(state_history_loss.cpu().numpy(), axis=0)
-            unnormalized_action["state_history_loss"] = state_history_loss
-
         return unnormalized_action
 
 

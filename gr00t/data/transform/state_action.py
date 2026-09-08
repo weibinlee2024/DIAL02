@@ -766,31 +766,31 @@ class StateActionTransform(InvertibleModalityTransform):
             assert len(split_key) == 2, "State keys should have two parts: 'modality.key'"
             if key not in self.modality_metadata:
                 modality, state_key = split_key
-                # state_history.* reuses state modality metadata / stats
-                lookup_modality = "state" if modality == "state_history" else modality
-                assert hasattr(modality_metadata, lookup_modality), f"{lookup_modality} config not found"
+                # state_future.* borrows state metadata (future frames of the same physical state)
+                src_modality = "state" if modality.startswith("state_future") else modality
+                assert hasattr(modality_metadata, src_modality), f"{src_modality} config not found"
                 assert state_key in getattr(
-                    modality_metadata, lookup_modality
-                ), f"{state_key} config not found in {lookup_modality}"
-                self.modality_metadata[key] = getattr(modality_metadata, lookup_modality)[state_key]
+                    modality_metadata, src_modality
+                ), f"{state_key} config not found in {src_modality}"
+                self.modality_metadata[key] = getattr(modality_metadata, src_modality)[state_key]
 
         # Check that all state keys specified in normalization_modes have their statistics in state_statistics
         for key in self.normalization_modes:
             split_key = key.split(".")
             assert len(split_key) == 2, "State keys should have two parts: 'modality.key'"
             modality, state_key = split_key
-            lookup_modality = "state" if modality == "state_history" else modality
-            assert hasattr(dataset_statistics, lookup_modality), f"{lookup_modality} statistics not found"
+            src_modality = "state" if modality.startswith("state_future") else modality
+            assert hasattr(dataset_statistics, src_modality), f"{src_modality} statistics not found"
             assert (
-                len(getattr(modality_metadata, lookup_modality)[state_key].shape) == 1
-            ), f"{getattr(modality_metadata, lookup_modality)[state_key].shape=}"
+                len(getattr(modality_metadata, src_modality)[state_key].shape) == 1
+            ), f"{getattr(modality_metadata, src_modality)[state_key].shape=}"
             if self.use_relative:
                 state_key = f"relative.{state_key}"
             assert state_key in getattr(
-                dataset_statistics, lookup_modality
+                dataset_statistics, src_modality
             ), f"{state_key} statistics not found"
             # print(f"{modality}.{state_key}")
-            self.normalization_statistics[key] = getattr(dataset_statistics, lookup_modality)[
+            self.normalization_statistics[key] = getattr(dataset_statistics, src_modality)[
                 state_key
             ].model_dump()
 

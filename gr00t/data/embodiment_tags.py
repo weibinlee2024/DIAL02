@@ -41,10 +41,6 @@ class EmbodimentTag(Enum):
 
     IRON = "iron"
 
-    LIBERO = "libero"
-    """
-    LIBERO Franka single-arm (RND dense / expert demos converted to LeRobot).
-    """
 
 
 # Embodiment tag string: to projector index in the Action Expert Module
@@ -56,5 +52,4 @@ EMBODIMENT_TAG_MAPPING = {
 
     EmbodimentTag.HUMAN_EGODEX.value: 0,
     EmbodimentTag.IRON.value: 1,
-    EmbodimentTag.LIBERO.value: 2,
 }

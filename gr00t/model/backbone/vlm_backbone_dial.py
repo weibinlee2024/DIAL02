@@ -128,7 +128,7 @@ class VLMBackbone(nn.Module):
             def grad_hook(grad):
                 if self._embed_tokens_hook_mask.device != grad.device:
                     self._embed_tokens_hook_mask = self._embed_tokens_hook_mask.to(grad.device)
-                return grad * self._embed_tokens_hook_mask
+                return grad * self._embed_tokens_hook_mask.to(grad.dtype)
 
             self._embed_tokens_hook_handle = embed_tokens.weight.register_hook(grad_hook)
         

@@ -127,12 +127,6 @@ class ModalityConfig(BaseModel):
             
     action_gap_range: Optional[list] = None
 
-    # Physical State History Monitor (default off — no sampling overhead)
-    use_state_history: bool = False
-    """If True, sample past proprio S_{t-H:t} for state_history_* keys."""
-    state_history_horizon: Optional[int] = None
-    """H in S_{t-H:t}; None → len(action delta_indices). History length is H+1."""
-
 
 class LeRobotSingleDataset(Dataset):
     """
@@ -590,6 +584,8 @@ class LeRobotSingleDataset(Dataset):
                 # Check if the key is valid
                 if key == "action.task_progress":
                     continue
+                if key.startswith("state_future."):
+                    continue  # state_future.* is sampled from the same columns as state.*
 
                 try:
                     self.lerobot_modality_meta.get_key_meta(key)
@@ -858,8 +854,10 @@ class LeRobotSingleDataset(Dataset):
         assert key.startswith(modality + "."), f"{key} must start with {modality + '.'}, got {key}"
         # Get the sub-key, e.g. state.joint_angles -> joint_angles
         key = key.replace(modality + ".", "")
+        # state_future samples the same underlying columns as state (future frames via its own delta_indices)
+        src_modality = "state" if modality == "state_future" else modality
         # Get the lerobot key
-        le_state_or_action_cfg = getattr(self.lerobot_modality_meta, modality)
+        le_state_or_action_cfg = getattr(self.lerobot_modality_meta, src_modality)
         le_key = le_state_or_action_cfg[key].original_key
         if le_key is None:
             le_key = key
@@ -879,7 +877,7 @@ class LeRobotSingleDataset(Dataset):
         )
         data_array = data_array[:, le_indices]
         # Get the state or action configuration
-        state_or_action_cfg = getattr(self.metadata.modalities, modality)[key]
+        state_or_action_cfg = getattr(self.metadata.modalities, src_modality)[key]
 
         # Pad the data
         return self.retrieve_data_and_pad(
@@ -966,7 +964,7 @@ class LeRobotSingleDataset(Dataset):
         """
         if modality == "video":
             return self.get_video(trajectory_id, key, base_index)
-        elif modality == "state" or modality == "action":
+        elif modality == "state" or modality == "action" or modality == "state_future":
             return self.get_state_or_action(trajectory_id, modality, key, base_index)
         elif modality == "language":
             return self.get_language(trajectory_id, key, base_index)
@@ -982,12 +980,6 @@ class LeRobotSingleDatasetWithGoalImage(LeRobotSingleDataset):
         self.action_gap_range = self.modality_configs["action"].action_gap_range # e.g. [16, 48]
         if self.vlm_gap is not None:
             assert self.action_gap_range is not None
-        action_cfg = self.modality_configs["action"]
-        self.use_state_history = bool(getattr(action_cfg, "use_state_history", False))
-        horizon = getattr(action_cfg, "state_history_horizon", None)
-        if horizon is None:
-            horizon = len(action_cfg.delta_indices)
-        self.state_history_horizon = int(horizon)
 
     def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
         # If new parameters are not configured, fall back to the old logic
@@ -999,8 +991,6 @@ class LeRobotSingleDatasetWithGoalImage(LeRobotSingleDataset):
                 # Get the data corresponding to each key in the modality
                 for key in self.modality_keys[modality]:
                     data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
-            if self.use_state_history:
-                self._fill_state_history(data, trajectory_id, base_index)
             return data
         
         data = {}
@@ -1030,27 +1020,7 @@ class LeRobotSingleDatasetWithGoalImage(LeRobotSingleDataset):
                     data[key] = self.get_state_or_action(trajectory_id, modality, key, action_curr_idx)
                 else:
                     data[key] = self.get_data_by_modality(trajectory_id, modality, key, vlm_curr_idx)
-
-        # 3. Optional past proprio history S_{t-H:t} at VLM current time t
-        if self.use_state_history:
-            self._fill_state_history(data, trajectory_id, vlm_curr_idx)
         return data
-
-    def _fill_state_history(self, data: dict, trajectory_id: int, t_idx: int) -> None:
-        """Sample GT past proprio at indices [t-H, ..., t] into state_history.* keys."""
-        traj_idx = self.get_trajectory_index(trajectory_id)
-        max_len = self.trajectory_lengths[traj_idx]
-        H = self.state_history_horizon
-        hist_indices = np.clip(np.arange(t_idx - H, t_idx + 1), 0, max_len - 1)
-        for key in self.modality_keys["state"]:
-            assert key.startswith("state."), f"Expected state.* key, got {key}"
-            frames = [
-                self.get_state_or_action(trajectory_id, "state", key, int(idx))
-                for idx in hist_indices
-            ]
-            # each frame: [1, dim] (state delta_indices typically [0]) → [H+1, dim]
-            hist_key = "state_history." + key[len("state.") :]
-            data[hist_key] = np.concatenate(frames, axis=0)
 
     def get_video_by_indices(self, trajectory_id: int, key: str, indices: np.ndarray) -> np.ndarray:
         # Helper function: read video frames directly by indices

@@ -61,11 +61,11 @@
     "tune_bridge_visual": false,
     "tune_bridge_goal": false,
     "num_bridge_tokens": 64,
-    "use_state_history": false,
-    "compute_state_history_loss": false,
-    "state_history_loss_weight": 1.0,
-    "state_history_horizon": null,
-    "tune_state_history_projector": true
+    "use_state_future": false,
+    "compute_state_future_loss": false,
+    "state_future_loss_weight": 1.0,
+    "state_future_horizon": null,
+    "tune_state_future_projector": true
   },
   "hidden_size": 2048,
   "model_dtype": "float32",

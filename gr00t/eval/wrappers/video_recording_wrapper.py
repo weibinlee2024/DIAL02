@@ -20,7 +20,6 @@ from pathlib import Path
 import av
 import gymnasium as gym
 import numpy as np
-import pdb
 
 def get_accumulate_timestamp_idxs(
     timestamps: list[float],
@@ -233,13 +232,11 @@ class VideoRecordingWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         result = super().reset(**kwargs)
-        pdb.set_trace()
         obs, info = result
         if {k for k in obs.keys() if k.startswith("state.")} != self.state_modality_keys:
             obs = self.get_additional_obs(obs)
             result = (obs, info)
         
-        pdb.set_trace()
         
         language = None
         obs = result[0]
@@ -270,9 +267,7 @@ class VideoRecordingWrapper(gym.Wrapper):
         return result
 
     def step(self, action):
-        pdb.set_trace()
         result = super().step(action)
-        pdb.set_trace()
         obs = result[0]
         if {k for k in obs.keys() if k.startswith("state.")} != self.state_modality_keys:
             obs = self.get_additional_obs(obs)
@@ -292,7 +287,6 @@ class VideoRecordingWrapper(gym.Wrapper):
         return result
 
     def get_additional_obs(self, obs):
-        pdb.set_trace()
         robosuite_env = self.env.env.env.env
 
         # 1. Extract 3D coordinates and 6D rotation for all joint points
@@ -320,7 +314,6 @@ class VideoRecordingWrapper(gym.Wrapper):
             obs[f"camera_{cam_name}_pos"] = cam_pos
             obs[f"camera_{cam_name}_rot6d"] = cam_rot_6d
 
-        pdb.set_trace()
         return obs
 
     def render(self, mode="rgb_array", **kwargs):

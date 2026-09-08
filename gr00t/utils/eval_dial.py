@@ -229,7 +229,6 @@ def calc_mse_for_single_trajectory(
     gt_action_across_time = []
     pred_action_across_time = []
     bridge_loss_across_times = []
-    state_history_loss_across_times = []
     action_dim_names = []
 
     for step_count in range(steps):
@@ -250,9 +249,6 @@ def calc_mse_for_single_trajectory(
             bridge_loss = action_chunk.get('bridge_loss', None)
             if bridge_loss is not None:
                 bridge_loss_across_times.append(bridge_loss)
-            sh_loss = action_chunk.get("state_history_loss", None)
-            if sh_loss is not None:
-                state_history_loss_across_times.append(sh_loss)
             for j in range(action_horizon):
                 # NOTE: concat_pred_action = action[f"action.{modality_keys[0]}"][j]
                 # the np.atleast_1d is to ensure the action is a 1D array, handle where single value is returned
@@ -294,12 +290,6 @@ def calc_mse_for_single_trajectory(
         bridge_loss = np.mean(bridge_loss_across_times)
     else:
         bridge_loss = None
-
-    if len(state_history_loss_across_times) > 0:
-        state_history_loss = float(np.mean(np.array(state_history_loss_across_times)))
-        print("state_history_mse across traj:", state_history_loss)
-    else:
-        state_history_loss = None
         
 
     # raise error when pred action has NaN

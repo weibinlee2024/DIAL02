@@ -146,27 +146,6 @@ class ConcatTransform(InvertibleModalityTransform):
                 [data.pop(key) for key in self.state_concat_order], dim=-1
             )  # [T, D_state]
 
-        # Optional Physical State History: state_history.* → data["state_history"]
-        if "state_history" in grouped_keys:
-            assert self.state_concat_order is not None, f"{self.state_concat_order=}"
-            hist_order = [
-                k.replace("state.", "state_history.", 1) for k in self.state_concat_order
-            ]
-            for key in hist_order:
-                assert key in data, f"Missing state history key {key} in {list(data.keys())}"
-                target_shapes = [self.state_dims[key.replace("state_history.", "state.", 1)]]
-                if self.is_rotation_key(key.replace("state_history.", "state.", 1)):
-                    target_shapes.append(6)
-                target_shapes.append(
-                    self.state_dims[key.replace("state_history.", "state.", 1)] * 2
-                )
-                assert (
-                    data[key].shape[-1] in target_shapes
-                ), f"State history dim mismatch for {key=}, {data[key].shape[-1]=}, {target_shapes=}"
-            data["state_history"] = torch.cat(
-                [data.pop(key) for key in hist_order], dim=-1
-            )  # [H+1, D_state]
-
         if "action" in grouped_keys:
             action_keys = grouped_keys["action"]
             assert self.action_concat_order is not None, f"{self.action_concat_order=}"
